@@ -315,13 +315,23 @@ COPY --chown=node:node --from=builder /app/scripts/dev/healthcheck.mjs ./healthc
 
 EXPOSE 20128
 
+# ── Litestream v0.5.17 Disaster Recovery ───────────────────────────────────
+# Pin exact verified stable release litestream/litestream:0.5.17 (multi-arch, pure Go).
+COPY --from=litestream/litestream:0.5.17 /usr/local/bin/litestream /usr/local/bin/litestream
+RUN chmod +x /usr/local/bin/litestream && /usr/local/bin/litestream version
+
+# Litestream configuration and startup entrypoint
+COPY etc/litestream.yml /etc/litestream.yml
+COPY --chmod=755 scripts/litestream-entrypoint.sh /app/litestream-entrypoint.sh
+RUN chown node:node /etc/litestream.yml /app/litestream-entrypoint.sh
+
 # Drop to non-root before ENTRYPOINT/CMD so every derived stage (runner-cli,
 # runner-web) also runs as a non-root user unless they explicitly switch back.
 USER node
 
 # Warns if the mounted data volume has wrong ownership
 COPY --chmod=755 scripts/check-permissions.sh /app/check-permissions.sh
-ENTRYPOINT ["/app/check-permissions.sh"]
+ENTRYPOINT ["/app/litestream-entrypoint.sh"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD ["node", "healthcheck.mjs"]

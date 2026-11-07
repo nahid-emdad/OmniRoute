@@ -1,0 +1,21 @@
+# Litestream v0.5 Configuration for Cloudflare R2 (S3-compatible)
+#
+# All credentials and bucket names are injected via environment variables at runtime.
+# Never hardcode secrets in this file.
+
+access-key-id: "${LITESTREAM_ACCESS_KEY_ID}"
+secret-access-key: "${LITESTREAM_SECRET_ACCESS_KEY}"
+
+snapshot:
+  interval: 24h
+  retention: 168h
+
+dbs:
+  - path: /app/data/storage.sqlite
+    replica:
+      type: s3
+      bucket: "${LITESTREAM_BUCKET}"
+      path: "omniroute-db"
+      endpoint: "https://${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com"
+      force-path-style: true
+      sync-interval: 1s
