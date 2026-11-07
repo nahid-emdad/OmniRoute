@@ -10,17 +10,17 @@ CONFIG_PATH="$TEST_ROOT/litestream.yml"
 
 echo "================================================================="
 echo "[TEST 3] Graceful Shutdown Ordering & Verification Test"
-echo "  (Local File-Replica Simulation; Cloudflare R2 requires credentials)"
+echo "  (Local File-Replica Simulation; sync-interval: 1m)"
 echo "================================================================="
 
-# 1. Litestream v0.5 replica configuration
+# 1. Litestream v0.5 replica configuration with cost-conscious 1m interval
 cat <<EOF > "$CONFIG_PATH"
 dbs:
   - path: "$DB_PATH"
     replica:
       type: file
       path: "$TEST_ROOT/replica"
-      sync-interval: 1s
+      sync-interval: 1m
 EOF
 
 # 2. Emulate OmniRoute child process with SQLite WAL and graceful SIGTERM trap
@@ -50,7 +50,7 @@ exit 0
 
 echo "[OmniRoute Mock] Ready and listening for SIGTERM..."
 while true; do
-  sleep 0.2
+  sleep 0.1
 done
 EOF
 chmod +x "$TEST_ROOT/omniroute_mock.sh"
@@ -60,14 +60,17 @@ echo "[TEST 3] Starting Litestream supervisor with OmniRoute mock..."
 litestream replicate -config "$CONFIG_PATH" -exec "$TEST_ROOT/omniroute_mock.sh $DB_PATH" &
 SUPERVISOR_PID=$!
 
-# Wait for startup and initial replica handshake
-sleep 1.5
+# Wait 2 seconds (far less than 1m sync-interval)
+sleep 2
 
 # 4. Trigger Graceful Shutdown via SIGTERM to Litestream supervisor
+SHUTDOWN_START=$(date +%s)
 echo "[TEST 3] Sending SIGTERM to Litestream supervisor PID $SUPERVISOR_PID..."
 kill -TERM "$SUPERVISOR_PID"
 wait "$SUPERVISOR_PID" 2>/dev/null || true
-echo "[TEST 3] Litestream supervisor exited."
+SHUTDOWN_END=$(date +%s)
+SHUTDOWN_DURATION=$((SHUTDOWN_END - SHUTDOWN_START))
+echo "[TEST 3] Litestream supervisor exited in ${SHUTDOWN_DURATION}s (immediate flush, not waiting 1m)."
 
 # 5. Simulate container destruction and restore from replica
 echo "[TEST 3] Wiping local database files to simulate cold start..."
@@ -85,6 +88,7 @@ echo "[TEST 3] Verification results:"
 echo "         - PRAGMA integrity_check:        $INTEGRITY"
 echo "         - Total items restored:          $ROW_COUNT"
 echo "         - Graceful shutdown canary:      '$CANARY_VAL'"
+echo "         - Shutdown flush elapsed:        ${SHUTDOWN_DURATION}s"
 
 if [ "$INTEGRITY" != "ok" ]; then
   echo "[TEST 3] FAILED: Integrity check failed!" >&2
@@ -97,6 +101,6 @@ if [ "$CANARY_VAL" != "zero_data_loss_verified" ]; then
 fi
 
 echo "================================================================="
-echo "[TEST 3] PASSED: Graceful shutdown ordering and zero-loss parity verified."
+echo "[TEST 3] PASSED: Graceful shutdown ordering and zero-loss parity verified with 1m sync."
 echo "================================================================="
 rm -rf "$TEST_ROOT"

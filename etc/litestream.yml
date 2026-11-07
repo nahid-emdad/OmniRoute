@@ -18,4 +18,4 @@ dbs:
       path: "omniroute-db"
       endpoint: "https://${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com"
       force-path-style: true
-      sync-interval: 1s
+      sync-interval: 1m
