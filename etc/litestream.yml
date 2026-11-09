@@ -6,6 +6,11 @@
 access-key-id: "${LITESTREAM_ACCESS_KEY_ID}"
 secret-access-key: "${LITESTREAM_SECRET_ACCESS_KEY}"
 
+socket:
+  enabled: true
+  path: /tmp/litestream.sock
+  permissions: 0600
+
 snapshot:
   interval: 24h
   retention: 168h

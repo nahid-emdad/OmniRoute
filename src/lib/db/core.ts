@@ -38,7 +38,12 @@ import {
   writeCallArtifact,
   type CallLogArtifact,
 } from "../usage/callLogArtifacts";
-import { migrateLegacyEncryptedString } from "./encryption";
+import {
+  decrypt,
+  isEncryptionEnabled,
+  looksEncrypted,
+  migrateLegacyEncryptedString,
+} from "./encryption";
 import { serializeJsonField } from "./providers/columns";
 import { invalidateDbCache } from "./readCache";
 import { rowToCamel } from "./caseMapping";
@@ -911,6 +916,79 @@ function autoMigrateLegacyEncryptedConnections(db: SqliteDatabase): number {
   return migratedCount;
 }
 
+function sanitizeStaleEncryptedCredentialsOnKeyRotation(db: SqliteDatabase): number {
+  if (!isEncryptionEnabled()) return 0;
+
+  const rows = db.prepare("SELECT * FROM provider_connections").all() as JsonRecord[];
+  let resetCount = 0;
+  let backupCreated = false;
+
+  const updateStmt = db.prepare(`
+    UPDATE provider_connections
+    SET
+      access_token = NULL,
+      refresh_token = NULL,
+      api_key = NULL,
+      id_token = NULL,
+      provider_specific_data = NULL,
+      is_active = 0,
+      test_status = 'pending_reauth',
+      last_error = 'STORAGE_ENCRYPTION_KEY was rotated. Re-authentication required.',
+      last_error_at = datetime('now'),
+      updated_at = datetime('now')
+    WHERE id = ?
+  `);
+
+  for (const row of rows) {
+    const rawAccessToken = typeof row.access_token === "string" ? row.access_token : "";
+    const rawRefreshToken = typeof row.refresh_token === "string" ? row.refresh_token : "";
+    const rawApiKey = typeof row.api_key === "string" ? row.api_key : "";
+    const rawIdToken = typeof row.id_token === "string" ? row.id_token : "";
+
+    const hasStaleEncryptedField =
+      (looksEncrypted(rawAccessToken) && decrypt(rawAccessToken, { quiet: true }) === null) ||
+      (looksEncrypted(rawRefreshToken) && decrypt(rawRefreshToken, { quiet: true }) === null) ||
+      (looksEncrypted(rawApiKey) && decrypt(rawApiKey, { quiet: true }) === null) ||
+      (looksEncrypted(rawIdToken) && decrypt(rawIdToken, { quiet: true }) === null);
+
+    if (hasStaleEncryptedField) {
+      if (!backupCreated) {
+        createManagedDbBackup(db, "key-rotation-credential-reset");
+        backupCreated = true;
+      }
+      updateStmt.run(row.id);
+      resetCount++;
+    }
+  }
+
+  // Also clean up stale encrypted secrets in key_value if they cannot be decrypted
+  try {
+    const secretRows = db
+      .prepare("SELECT key, value FROM key_value WHERE namespace = 'secrets'")
+      .all() as Array<{ key: string; value: string }>;
+    for (const sRow of secretRows) {
+      if (typeof sRow.value === "string" && sRow.value.includes("enc:v1:")) {
+        try {
+          const parsed = JSON.parse(sRow.value);
+          if (looksEncrypted(parsed) && decrypt(parsed, { quiet: true }) === null) {
+            db.prepare("DELETE FROM key_value WHERE namespace = 'secrets' AND key = ?").run(sRow.key);
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+
+  if (resetCount > 0) {
+    invalidateDbCache("connections");
+    console.log(
+      `[DB] Safely reset stale encrypted credentials on ${resetCount} provider connection(s) (re-authentication required). All connection metadata preserved.`
+    );
+  }
+
+  return resetCount;
+}
+
+
 let dbHealthCheckTimer: NodeJS.Timeout | null = null;
 
 function getDbHealthCheckIntervalMs(): number {
@@ -1437,6 +1515,14 @@ export function getDbInstance(): SqliteDatabase {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[DB] Legacy encryption migration failed: ${message}`);
+  }
+
+  // Safely reset any credentials that cannot be decrypted due to key rotation
+  try {
+    sanitizeStaleEncryptedCredentialsOnKeyRotation(db);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[DB] Key rotation credential check: ${message}`);
   }
 
   startDbHealthCheckScheduler(db);
